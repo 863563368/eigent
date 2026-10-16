@@ -14,6 +14,7 @@
 
 """自托管部署开关与启动配置校验。"""
 
+import ipaddress
 import os
 from urllib.parse import urlparse
 
@@ -36,7 +37,25 @@ def validate_production_settings() -> None:
     if enabled("REMOTE_CONTROL_ALLOW_UNSAFE_ORIGINS"):
         raise RuntimeError("Production cannot enable unsafe CORS/WebSocket origins")
     issuer = urlparse(os.getenv("TOKEN_ISSUER", ""))
-    if issuer.scheme != "https" or not issuer.netloc:
+    http_ip = False
+    if enabled("ALLOW_HTTP_IP_DEPLOYMENT"):
+        # 放宽仅限显式声明的 HTTP IPv4 模式，不能关闭其他生产安全校验。
+        try:
+            address = ipaddress.IPv4Address(issuer.hostname or "")
+            http_ip = (
+                issuer.scheme == "http"
+                and issuer.port == 3001
+                and not address.is_unspecified
+                and not address.is_multicast
+                and not issuer.username
+                and not issuer.password
+                and issuer.path in {"", "/"}
+                and not issuer.query
+                and not issuer.fragment
+            )
+        except ValueError:
+            pass
+    if (issuer.scheme != "https" or not issuer.netloc) and not http_ip:
         raise RuntimeError("Production TOKEN_ISSUER must be an HTTPS origin")
     origins = os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
     if not origins or any(not origin.strip() or origin.strip() == "*" for origin in origins):

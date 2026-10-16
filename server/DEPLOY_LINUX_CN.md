@@ -2,6 +2,22 @@
 
 本说明对应 `codex/self-hosted-server` 分支。服务端提供账户、管理员、角色、设备、任务事件统计和原有业务能力；桌面客户端的自有登录与同步接入需要在后续客户端阶段完成。
 
+## 无域名：使用 IPv4 部署
+
+服务器已安装 Git、Python 3、Docker、Compose 插件，并放行 TCP 3001。把下面的 `你的服务器IP` 换成实际 IPv4 地址。
+
+```bash
+git clone --single-branch --branch codex/self-hosted-server https://github.com/863563368/eigent.git
+cd eigent/server
+python3 scripts/init_production.py --http-ip 你的服务器IP
+docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
+docker compose --env-file .env.production -f docker-compose.production.yml exec api python scripts/manage.py bootstrap-admin --email admin@example.com
+```
+
+访问 `http://你的服务器IP:3001/docs`。IP 模式不启用 `edge` profile，不启动 Caddy。HTTP 会明文传输登录信息，先在受控网络中使用。此模式更新或重新启动时也不要添加 `--profile edge`。
+
+已有 `.env.production` 时不要删除或重新生成密钥。若需要从已有 HTTPS 配置切换为 IP 模式，保留密码和密钥，将 `TOKEN_ISSUER`、`CORS_ALLOW_ORIGINS`、`REMOTE_CONTROL_WEB_ORIGIN` 改成 `http://你的服务器IP:3001`，设置 `ALLOW_HTTP_IP_DEPLOYMENT=true`、`API_BIND_ADDRESS=0.0.0.0`，并将两个可信代理设置改为 `127.0.0.1`。先停止原有 Caddy，再按不带 `edge` 的命令重新创建应用容器。更换 issuer 后需重新登录。
+
 ## 首次部署
 
 前置条件：Linux 已安装 Git、Python 3、Docker Engine 和 Docker Compose 插件；域名已解析到服务器；公网允许 TCP 80、443。首次构建需要访问镜像仓库、Python 包源及 CAMEL 的 Git 依赖。

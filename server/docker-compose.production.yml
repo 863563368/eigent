@@ -77,7 +77,7 @@ services:
   api:
     <<: *application
     restart: unless-stopped
-    ports: ['127.0.0.1:3001:5678']
+    ports: ['${API_BIND_ADDRESS:-127.0.0.1}:3001:5678']
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
