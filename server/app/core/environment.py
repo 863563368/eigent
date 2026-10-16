@@ -143,6 +143,9 @@ def auto_include_routers(api: FastAPI, prefix: str, directory: str):
                         extra={"module_name": module_name, "file_path": str(file_path), "error": str(e)},
                         exc_info=True,
                     )
+                    # 生产环境缺少任何控制器时中止启动，不能以残缺接口集上线。
+                    if env("DEPLOYMENT_ENV") == "production":
+                        raise RuntimeError(f"Controller failed to load: {module_name}") from e
 
     logger.info(
         "Automatic router registration completed",

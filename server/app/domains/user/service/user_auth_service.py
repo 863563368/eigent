@@ -15,26 +15,17 @@
 """UserAuthService: login, refresh, logout. Follows CreditsService pattern."""
 
 import time
-from datetime import datetime
-
-import jwt
-from loguru import logger
 
 from app.core.database import session_make
 from app.core.encrypt import password_verify
-from app.core.environment import env_not_empty
-from app.domains.remote_control.service.remote_control_service import RemoteControlService
-from app.model.user.user import Status, User
-
-from app.shared.auth import create_access_token, create_refresh_token
-from app.shared.auth.user_auth import (
-    TOKEN_AUDIENCE,
-    TOKEN_ISSUER,
-    _get_jti,
-    decode_refresh_token,
-)
-from app.shared.auth.token_blacklist import blacklist_token, is_blacklisted
 from app.domains.user.schema import AuthResult
+from app.model.user.user import Status, User
+from app.shared.auth import create_access_token, create_refresh_token
+from app.shared.auth.token_blacklist import consume_refresh_token, is_blacklisted
+from app.shared.auth.user_auth import (
+    decode_refresh_token,
+    token_version_from_token,
+)
 
 
 class UserAuthService:
@@ -44,21 +35,19 @@ class UserAuthService:
     def login(email: str, password: str) -> AuthResult:
         """Password login + credits refresh. Returns tokens or error."""
         with session_make() as s:
-            user = s.exec(
-                User.by(User.email == email, s=s)
-            ).one_or_none()
+            user = User.by(User.email == email.lower(), s=s).one_or_none()
 
         if not user or not password_verify(password, user.password):
             return AuthResult(success=False, error_code="AUTH_INVALID_CREDENTIALS")
-        if user.status == Status.Block:
+        if user.status == Status.Block or user.deleted_at is not None:
             return AuthResult(success=False, error_code="AUTH_ACCOUNT_BLOCKED")
         if not user.is_active:
             return AuthResult(success=False, error_code="AUTH_ACCOUNT_INACTIVE")
 
         # No credits refresh in eigent (no billing domain)
 
-        access_token = create_access_token(user.id)
-        refresh_token = create_refresh_token(user.id)
+        access_token = create_access_token(user.id, token_version=user.token_version)
+        refresh_token = create_refresh_token(user.id, token_version=user.token_version)
         return AuthResult(
             success=True,
             access_token=access_token,
@@ -81,18 +70,19 @@ class UserAuthService:
 
         if not user:
             return AuthResult(success=False, error_code="AUTH_USER_NOT_FOUND")
-        if user.status == Status.Block:
+        if user.status == Status.Block or user.deleted_at is not None:
             return AuthResult(success=False, error_code="AUTH_ACCOUNT_BLOCKED")
         if not user.is_active:
             return AuthResult(success=False, error_code="AUTH_ACCOUNT_INACTIVE")
 
         # Blacklist old refresh token
-        if jti:
-            ttl = max(0, exp_ts - int(time.time()))
-            await blacklist_token(jti, ttl)
+        if token_version_from_token(refresh_token_str) != user.token_version:
+            return AuthResult(success=False, error_code="AUTH_TOKEN_REVOKED")
+        if not jti or not await consume_refresh_token(jti, exp_ts - int(time.time())):
+            return AuthResult(success=False, error_code="AUTH_TOKEN_REVOKED")
 
-        access_token = create_access_token(user.id)
-        new_refresh_token = create_refresh_token(user.id)
+        access_token = create_access_token(user.id, token_version=user.token_version)
+        new_refresh_token = create_refresh_token(user.id, token_version=user.token_version)
         return AuthResult(
             success=True,
             access_token=access_token,
@@ -102,28 +92,15 @@ class UserAuthService:
 
     @staticmethod
     async def logout(token: str) -> bool:
-        """Revoke token by adding to blacklist."""
+        """校验当前用户令牌后撤销全部会话，不吞掉数据库或撤销故障。"""
         if not token:
             return True
-        jti = _get_jti(token)
-        if jti:
-            try:
-                payload = jwt.decode(
-                    token,
-                    env_not_empty("secret_key"),
-                    algorithms=["HS256"],
-                    issuer=TOKEN_ISSUER,
-                    audience=TOKEN_AUDIENCE,
-                    options={"verify_exp": False},
-                )
-                user_id = payload.get("id")
-                exp = payload.get("exp")
-                ttl = max(0, int(exp) - int(datetime.utcnow().timestamp())) if exp else 3600
-                await blacklist_token(jti, ttl)
-                logger.info("logout", extra={"user_id": user_id})
-                if user_id is not None:
-                    with session_make() as s:
-                        RemoteControlService.revoke_user_sessions(int(user_id), s, "logout")
-            except Exception as e:
-                logger.warning("logout: token decode/blacklist failed", extra={"error": str(e)})
+        from app.domains.user.service.session_service import revoke_account_sessions
+        from app.shared.auth.user_auth import V1UserAuth, validate_account_session
+
+        auth = V1UserAuth.decode_token(token)
+        with session_make() as db:
+            validate_account_session(db.get(User, auth.id), auth)
+            revoke_account_sessions(auth.id, db, "logout")
+            db.commit()
         return True

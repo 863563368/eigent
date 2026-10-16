@@ -16,10 +16,11 @@ from datetime import date, datetime
 from enum import IntEnum
 
 from pydantic import BaseModel, EmailStr, field_validator
-from sqlalchemy import Integer, SmallInteger, text
+from sqlalchemy import Boolean, Integer, SmallInteger, text
 from sqlalchemy_utils import ChoiceType
-from sqlmodel import Column, Field
+from sqlmodel import JSON, Column, Field
 
+from app.core.account_policy import DEFAULT_PERMISSIONS
 from app.core.encrypt import password_hash
 from app.model.abstract.model import AbstractModel, DefaultTimes
 
@@ -44,6 +45,11 @@ class User(AbstractModel, DefaultTimes, table=True):
     last_monthly_credit_date: date | None = Field(default=None, description="Last month monthly credits were granted")
     inviter_user_id: int | None = Field(default=None, foreign_key="user.id", description="Inviter user ID")
     status: Status = Field(default=Status.Normal.value, sa_column=Column(ChoiceType(Status, SmallInteger())))
+    is_active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, server_default=text("true")))
+    token_version: int = Field(default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
+    permissions: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_PERMISSIONS), sa_column=Column(JSON, nullable=False)
+    )
 
 
 class UserProfile(BaseModel):
@@ -54,7 +60,7 @@ class UserProfile(BaseModel):
 
 class LoginByPasswordIn(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=72)
 
 
 class LoginResponse(BaseModel):
@@ -73,6 +79,7 @@ class UserCreate(UserIn):
 
 
 class UserOut(BaseModel):
+    id: int
     email: EmailStr
     avatar: str | None = ""
     username: str | None = ""
@@ -81,6 +88,8 @@ class UserOut(BaseModel):
     work_desc: str | None = ""
     credits: int
     status: Status
+    is_active: bool
+    permissions: list[str]
     created_at: datetime
 
 
@@ -97,7 +106,9 @@ class RegisterIn(BaseModel):
 
     @field_validator("password", mode="before")
     def password_strength(cls, v):
-        # At least 8 chars, must contain letters and numbers
+        # bcrypt 最多接受 72 字节，所有密码入口保持相同校验。
+        if len(v.encode("utf-8")) > 72:
+            raise ValueError("Password must be at most 72 UTF-8 bytes")
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters long")
         if not any(c.isdigit() for c in v) or not any(c.isalpha() for c in v):

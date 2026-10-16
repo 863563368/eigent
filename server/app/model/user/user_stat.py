@@ -12,7 +12,7 @@
 # limitations under the License.
 # ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 from sqlmodel import Field, select
@@ -20,7 +20,7 @@ from sqlmodel import Field, select
 from app.model.abstract.model import AbstractModel, DefaultTimes
 
 
-class UserStatActionEnum(str, Enum):
+class UserStatActionEnum(StrEnum):
     download_count = "download_count"
     register_count = "register_count"
     task_complete_count = "task_complete_count"
@@ -33,8 +33,8 @@ class UserStatActionEnum(str, Enum):
 class UserStatActionIn(BaseModel):
     user_id: int | None = None
     action: UserStatActionEnum
-    value: int = 1
-    model_type: str | None = None
+    value: int = Field(default=1, ge=1, le=1000)
+    model_type: str | None = Field(default=None, max_length=32)
 
 
 class UserStat(AbstractModel, DefaultTimes, table=True):

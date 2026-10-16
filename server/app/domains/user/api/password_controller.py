@@ -17,9 +17,10 @@ from fastapi_babel import _
 from sqlmodel import Session
 
 from app.core import code
+from app.core.account_creation import validate_registration
 from app.core.database import session
-from app.core.encrypt import password_hash, password_verify
-from app.domains.remote_control.service.remote_control_service import RemoteControlService
+from app.core.encrypt import password_verify
+from app.domains.user.service.session_service import revoke_account_sessions
 from app.model.user.user import UpdatePassword, UserOut
 from app.shared.auth import auth_must
 from app.shared.auth.user_auth import V1UserAuth
@@ -37,7 +38,11 @@ def update_password(
         raise UserException(code.error, _("Password is incorrect"))
     if data.new_password != data.re_new_password:
         raise UserException(code.error, _("The two passwords do not match"))
-    model.password = password_hash(data.new_password)
-    model.save(db_session)
-    RemoteControlService.revoke_user_sessions(auth.id, db_session, "password_change")
+    # 所有改密入口复用注册密码强度与 bcrypt 字节长度校验。
+    validated = validate_registration(model.email, data.new_password)
+    model.password = validated.password
+    db_session.add(model)
+    revoke_account_sessions(auth.id, db_session, "password_change")
+    db_session.commit()
+    db_session.refresh(model)
     return model

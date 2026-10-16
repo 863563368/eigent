@@ -1,16 +1,17 @@
 #!/bin/sh
+set -eu
 
 # wait for database to be ready
 echo "Waiting for database to be ready..."
-while ! nc -z postgres 5432; do
-  sleep 1
-done
+python scripts/wait_for_db.py
 echo "Database is ready!"
 
 # run database migrations
 echo "Running database migrations..."
-uv run alembic upgrade head
+if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
+  alembic upgrade head
+fi
 
 # start application
 echo "Starting application..."
-exec uv run uvicorn main:api --host 0.0.0.0 --port 5678
+exec uvicorn main:api --host 0.0.0.0 --port 5678 --proxy-headers --forwarded-allow-ips "${FORWARDED_ALLOW_IPS:-127.0.0.1}"

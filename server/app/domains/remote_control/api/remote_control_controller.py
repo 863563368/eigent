@@ -374,13 +374,24 @@ async def _auth_token_with_jti(
     raw = token if token_is_stripped else _strip_bearer(token)
     if not raw:
         raise HTTPException(status_code=401, detail="Authentication required")
-    auth = V1UserAuth.decode_token(raw)
+    try:
+        auth = V1UserAuth.decode_token(raw)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid authentication token") from None
     jti = _get_jti(raw)
     if jti and await is_blacklisted(jti):
         raise HTTPException(status_code=401, detail="Token has been revoked")
     user = db.get(User, auth.id)
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    # 长连接也必须检查持久化账户状态、会话版本与服务端权限。
+    from app.core.account_policy import require_user_permission
+    from app.shared.auth.user_auth import validate_account_session
+
+    try:
+        validate_account_session(user, auth)
+        require_user_permission(user, "remote:control")
+        require_user_permission(user, "tasks:execute")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Account or session is disabled") from None
     auth._user = user
     return auth, jti
 
@@ -1114,6 +1125,10 @@ async def bridge_subscribe(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             msg_type = msg.get("type")
+            # 结束旧事务快照，每次消息检查账户撤销状态，不能仅靠 JWT 到期时间。
+            db.rollback()
+            if msg_type not in {"ping", "reauth"}:
+                await _auth_token_with_jti(token_raw, db, token_is_stripped=True)
             if msg_type == "ping":
                 # Re-validate auth: the JWT has an exp claim that we cached at
                 # connect, and may be added to the blacklist mid-flight (e.g.
@@ -1146,6 +1161,7 @@ async def bridge_subscribe(websocket: WebSocket):
                         await websocket.close(code=4401)
                         return
                     next_blacklist_check_at = now + timedelta(seconds=blacklist_check_interval)
+                await _auth_token_with_jti(token_raw, db, token_is_stripped=True)
                 RemoteControlRedis.refresh_bridge(desktop_instance_id, user_id, worker_id)
                 await _flush_pending_bridge_commands(
                     desktop_instance_id,
@@ -1331,6 +1347,8 @@ async def events_subscribe(websocket: WebSocket, session_id: str):
 
         while True:
             msg = await websocket.receive_json()
+            db.rollback()
+            rc_session = RemoteControlService.verify_link(session_id, link_token, None, db)
             if msg.get("type") == "ping":
                 await websocket.send_json({"type": "pong", "timestamp": datetime.utcnow().isoformat()})
             elif msg.get("type") == "subscribe_project":

@@ -22,8 +22,9 @@ TTL matches remaining token lifetime.
 import json
 import os
 
-from app.core.environment import env_or_fail
 from redis import asyncio as aioredis
+
+from app.core.environment import env_or_fail
 
 _redis: aioredis.Redis | None = None
 BLACKLIST_PREFIX = "token:blacklist:"
@@ -46,6 +47,7 @@ async def is_blacklisted(jti: str) -> bool:
         return await r.exists(key) > 0
     except Exception as e:
         from loguru import logger
+
         logger.warning(f"Redis blacklist check failed (fail-closed): {e}")
         return True
 
@@ -68,7 +70,21 @@ async def blacklist_token(jti: str, ttl_seconds: int) -> None:
         await _publish_to_session_redis_if_needed(payload)
     except Exception as e:
         from loguru import logger
-        logger.error(f"Redis blacklist_token failed: {e}")
+
+        logger.error("Redis blacklist write failed")
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail="Token revocation is temporarily unavailable") from e
+
+
+async def consume_refresh_token(jti: str, ttl_seconds: int) -> bool:
+    """原子消费刷新令牌，并发刷新只能有一个请求成功；Redis 故障时拒绝签发。"""
+    from fastapi import HTTPException
+
+    try:
+        return bool(await _get_redis().set(f"{BLACKLIST_PREFIX}{jti}", "1", ex=max(1, ttl_seconds), nx=True))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Token refresh is temporarily unavailable") from exc
 
 
 async def _publish_to_session_redis_if_needed(payload: str) -> None:

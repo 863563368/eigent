@@ -38,6 +38,7 @@ class Admin(AbstractModel, DefaultTimes, table=True):
     name: str
     user_id: int = 0
     status: int = Field(default=1, sa_column=Column(ChoiceType(Status, SmallInteger())))
+    token_version: int = Field(default=0, nullable=False, sa_column_kwargs={"server_default": "0"})
 
     roles: Mapped[list[Role]] = Relationship(
         link_model=AdminRole,

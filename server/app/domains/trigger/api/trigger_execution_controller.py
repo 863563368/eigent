@@ -235,8 +235,11 @@ async def subscribe_executions(websocket: WebSocket):
             if jti and await _is_blacklisted(jti):
                 raise Exception("Token has been revoked")
             user = ws_db_session.get(User, auth.id)
-            if not user:
-                raise Exception("User not found")
+            # WebSocket 与 HTTP 使用相同的账户状态、会话版本和能力检查。
+            from app.shared.auth.user_auth import validate_account_session
+            from app.core.account_policy import require_user_permission
+            validate_account_session(user, auth)
+            require_user_permission(user, "tasks:execute")
             auth._user = user
             user_id = auth.id
             logger.info(f"User authenticated for WebSocket {user_id} and {session_id}", extra={
@@ -284,6 +287,9 @@ async def subscribe_executions(websocket: WebSocket):
             while True:
                 try:
                     msg = await websocket.receive_json()
+                    # 刷新事务快照，防止长连接在账户退出后继续确认执行。
+                    ws_db_session.rollback()
+                    await auth_must(token=auth_token, db_session=ws_db_session)
                     
                     if msg.get("type") == "ack" and msg.get("execution_id"):
                         execution_id = msg["execution_id"]
@@ -293,8 +299,9 @@ async def subscribe_executions(websocket: WebSocket):
                         
                         # Update execution status to running
                         execution = ws_db_session.exec(
-                            select(TriggerExecution).where(
-                                TriggerExecution.execution_id == execution_id
+                            select(TriggerExecution).join(Trigger).where(
+                                TriggerExecution.execution_id == execution_id,
+                                Trigger.user_id == str(user_id),
                             )
                         ).first()
                         
@@ -336,7 +343,7 @@ async def subscribe_executions(websocket: WebSocket):
                         "type": "heartbeat",
                         "timestamp": datetime.now(timezone.utc).isoformat()
                     })
-                except:
+                except Exception:
                     break
         
         # Run both tasks concurrently

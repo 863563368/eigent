@@ -21,18 +21,19 @@ import uuid
 from datetime import datetime, timedelta
 
 import jwt
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 from fastapi.security import OAuth2PasswordBearer
 from fastapi_babel import _
 from jwt.exceptions import InvalidTokenError
 from sqlmodel import Session, select
 
 from app.core import code
+from app.core.account_policy import require_user_permission
 from app.core.database import session
 from app.core.environment import env, env_not_empty
 from app.model.mcp.proxy import ApiKey
 from app.model.user.key import Key
-from app.model.user.user import User
+from app.model.user.user import Status, User
 from app.shared.auth.token_blacklist import is_blacklisted
 from app.shared.exception import NoPermissionException, TokenException
 
@@ -85,9 +86,10 @@ oauth2_scheme = OAuth2PasswordBearer(
 class V1UserAuth:
     """v1 user auth context."""
 
-    def __init__(self, id: int, expired_at: datetime):
+    def __init__(self, id: int, expired_at: datetime, token_version: int = 0):
         self.id = id
         self.expired_at = expired_at
+        self.token_version = token_version
         self._user: User | None = None
 
     @property
@@ -116,7 +118,7 @@ class V1UserAuth:
                     code.token_expired,
                     _message("Validate credentials expired"),
                 )
-            return V1UserAuth(user_id, datetime.fromtimestamp(payload["exp"]))
+            return V1UserAuth(user_id, datetime.fromtimestamp(payload["exp"]), payload.get("ver", 0))
         except InvalidTokenError:
             raise TokenException(
                 code.token_invalid,
@@ -124,11 +126,14 @@ class V1UserAuth:
             )
 
     @classmethod
-    def create_access_token(cls, user_id: int, expires_delta: timedelta | None = None) -> str:
+    def create_access_token(
+        cls, user_id: int, expires_delta: timedelta | None = None, *, token_version: int = 0
+    ) -> str:
         """Create access token with 1 week expiry and type: user claim (M3, M4)."""
         expire = datetime.utcnow() + (expires_delta or TOKEN_EXPIRY)
         to_encode = {
             "id": user_id,
+            "ver": token_version,
             "type": TOKEN_TYPE_USER,
             "jti": str(uuid.uuid4()),
             "iss": TOKEN_ISSUER,
@@ -138,11 +143,12 @@ class V1UserAuth:
         return jwt.encode(to_encode, SECRET_KEY, algorithm="HS256")
 
     @classmethod
-    def create_refresh_token(cls, user_id: int) -> str:
+    def create_refresh_token(cls, user_id: int, *, token_version: int = 0) -> str:
         """Create refresh token with 30d expiry (M3)."""
         expire = datetime.utcnow() + REFRESH_EXPIRY
         to_encode = {
             "id": user_id,
+            "ver": token_version,
             "type": TOKEN_TYPE_REFRESH,
             "jti": str(uuid.uuid4()),
             "iss": TOKEN_ISSUER,
@@ -167,6 +173,13 @@ def _get_jti(token: str) -> str | None:
         return payload.get("jti")
     except Exception:
         return None
+
+
+def token_version_from_token(token: str) -> int:
+    """读取已经校验签名和环境归属的令牌版本，兼容迁移前版本零的会话。"""
+    return jwt.decode(token, SECRET_KEY, algorithms=["HS256"], issuer=TOKEN_ISSUER, audience=TOKEN_AUDIENCE).get(
+        "ver", 0
+    )
 
 
 async def decode_refresh_token(token: str) -> tuple[int, str | None, int]:
@@ -202,9 +215,20 @@ async def decode_refresh_token(token: str) -> tuple[int, str | None, int]:
         )
 
 
+def validate_account_session(user: User | None, auth: V1UserAuth) -> None:
+    """HTTP 和 WebSocket 共用账户状态检查，避免长连接绕过封禁和退出。"""
+    if user is None:
+        raise TokenException(code.token_invalid, _message("User not found"))
+    if user.status != Status.Normal or not user.is_active or user.deleted_at is not None:
+        raise TokenException(code.token_blocked, _message("Account is disabled"))
+    if auth.token_version != user.token_version:
+        raise TokenException(code.token_blocked, _message("Session has been revoked"))
+
+
 async def auth_must(
     token: str | None = Depends(oauth2_scheme),
     db_session: Session = Depends(session),
+    request: Request = None,
 ) -> V1UserAuth:
     """Require valid user token. Raises TokenException if invalid or blacklisted."""
     if not token:
@@ -214,20 +238,32 @@ async def auth_must(
     if jti and await is_blacklisted(jti):
         raise TokenException(code.token_blocked, _message("Token has been revoked"))
     user = db_session.get(User, model.id)
-    if not user:
-        raise TokenException(code.token_invalid, _message("User not found"))
+    # 每次请求检查账户状态和会话版本，封禁、改密、退出后旧令牌立即失效。
+    validate_account_session(user, model)
+    if request is not None:
+        path = request.url.path
+        if "/sync/execution/" in path:
+            require_user_permission(user, "tasks:execute")
+            require_user_permission(user, "models:use")
+        elif "/sync/events:ingest" in path:
+            require_user_permission(user, "sync:write")
+        elif "/remote-control" in path:
+            require_user_permission(user, "remote:control")
+            require_user_permission(user, "tasks:execute")
+        elif "/v1/execution" in path or "/v1/trigger" in path:
+            require_user_permission(user, "tasks:execute")
     model._user = user
     return model
 
 
-def create_access_token(user_id: int) -> str:
+def create_access_token(user_id: int, *, token_version: int = 0) -> str:
     """Convenience: create access token with default 1 week expiry."""
-    return V1UserAuth.create_access_token(user_id)
+    return V1UserAuth.create_access_token(user_id, token_version=token_version)
 
 
-def create_refresh_token(user_id: int) -> str:
+def create_refresh_token(user_id: int, *, token_version: int = 0) -> str:
     """Create refresh token for token renewal."""
-    return V1UserAuth.create_refresh_token(user_id)
+    return V1UserAuth.create_refresh_token(user_id, token_version=token_version)
 
 
 async def auth_optional(

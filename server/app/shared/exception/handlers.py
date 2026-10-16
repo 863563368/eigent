@@ -39,7 +39,16 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             content={
                 "code": code.form_error,
-                "error": jsonable_encoder(trans.translate(list(e.errors()), locale=lang)),
+                # 校验失败也不回显原始密码、令牌或整段请求数据。
+                "error": jsonable_encoder(
+                    trans.translate(
+                        [
+                            {key: value for key, value in item.items() if key not in {"input", "ctx"}}
+                            for item in e.errors()
+                        ],
+                        locale=lang,
+                    )
+                ),
             }
         )
 

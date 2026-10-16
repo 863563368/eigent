@@ -25,25 +25,22 @@ ENV UV_LINK_MODE=copy
 
 ENV UV_PYTHON_INSTALL_MIRROR=https://registry.npmmirror.com/-/binary/python-build-standalone
 
-ARG database_url
-ENV database_url=$database_url
-
 # Copy dependency files first
 COPY server/pyproject.toml server/uv.lock ./
 
 # Install the project's dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-project --no-dev
+    uv sync --frozen --no-install-project --no-dev
 
 # Then, add the rest of the project source code and install it
 # Installing separately from its dependencies allows optimal layer caching
 COPY server/ /app
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev
+    uv sync --frozen --no-dev
 
 RUN uv run pybabel extract -F babel.cfg -o messages.pot .  && \
-    uv run pybabel init -i messages.pot -d lang -l zh_CN  && \
+    (test -f lang/zh_CN/LC_MESSAGES/messages.po || uv run pybabel init -i messages.pot -d lang -l zh_CN) && \
     uv run pybabel compile -d lang -l zh_CN
 
 
@@ -61,10 +58,9 @@ RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
 RUN sed -i 's/\r$//' /app/celery/worker/start && chmod +x /app/celery/worker/start
 RUN sed -i 's/\r$//' /app/celery/beat/start && chmod +x /app/celery/beat/start
 
-# Bake the latest server/ commit into the image for stale-server detection.
-# Uses --mount=type=bind to access .git without adding it to a layer.
-RUN --mount=type=bind,source=.git,target=/tmp/.git \
-    echo "EIGENT_SERVER_GIT_COMMIT=$(git --git-dir=/tmp/.git log -1 --format=%H -- server/ 2>/dev/null || echo unknown)" > /app/.image_env
+# 版本信息通过构建参数传入，源码压缩包部署也不再依赖 .git。
+ARG SERVER_CODE_HASH=unknown
+RUN echo "EIGENT_SERVER_GIT_COMMIT=${SERVER_CODE_HASH}" > /app/.image_env
 
 # Reset the entrypoint, don't invoke `uv`
 ENTRYPOINT []

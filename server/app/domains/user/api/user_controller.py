@@ -12,7 +12,7 @@
 # limitations under the License.
 # ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -111,6 +111,9 @@ def record_user_stat(
     db_session: Session = Depends(session),
     auth: V1UserAuth = Depends(auth_must),
 ):
+    # 兼容旧客户端的运营计数，不允许客户端伪造支付或注册数据。
+    if data.action.value in {"paid_amount_on_avg_task", "register_count"}:
+        raise HTTPException(status_code=403, detail="This statistic is server managed")
     data.user_id = auth.id
     stat = UserStat.record_action(db_session, data)
     return stat

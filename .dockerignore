@@ -2,9 +2,7 @@
 # Docker reads it from the context root.
 
 # Source control
-# Note: .git is intentionally NOT ignored — server/Dockerfile bind-mounts it
-# (--mount=type=bind,source=.git) to stamp the server commit into the image
-# without baking .git into any layer. Excluding it here breaks the build.
+.git
 .gitignore
 .gitattributes
 
@@ -50,6 +48,11 @@ yarn-error.log*
 .env.development.local
 .env.test.local
 .env.production.local
+**/.env
+**/.env.local
+**/.env.production
+**/.env.production.local
+**/.env.development.local
 
 # Electron / desktop build artifacts not needed in runtime images.
 out

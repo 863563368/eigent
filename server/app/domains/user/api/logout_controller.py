@@ -12,58 +12,22 @@
 # limitations under the License.
 # ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-"""v1 Logout - token blacklist, audit log."""
+"""退出时撤销账户的全部登录与远程控制会话。"""
 
-from datetime import datetime
-
-import jwt
 from fastapi import APIRouter, Depends
-from loguru import logger
 from sqlmodel import Session
 
 from app.core.database import session
-from app.core.environment import env_not_empty
-from app.domains.remote_control.service.remote_control_service import RemoteControlService
-from app.shared.auth.token_blacklist import blacklist_token
-from app.shared.auth.user_auth import (
-    TOKEN_AUDIENCE,
-    TOKEN_ISSUER,
-    _get_jti,
-    oauth2_scheme,
-)
+from app.domains.user.service.session_service import revoke_account_sessions
+from app.shared.auth import auth_must
+from app.shared.auth.user_auth import V1UserAuth
 
 router = APIRouter(prefix="/user", tags=["V1 Auth"])
 
 
-@router.post("/logout", name="logout")
-async def logout(token: str = Depends(oauth2_scheme), db_session: Session = Depends(session)):
-    """Revoke current token. Requires Bearer token."""
-    if not token:
-        logger.info("logout: no token provided")
-        return {"success": True, "message": "No token to revoke"}
-    jti = _get_jti(token)
-    user_id = None
-    if jti:
-        try:
-            payload = jwt.decode(
-                token,
-                env_not_empty("secret_key"),
-                algorithms=["HS256"],
-                issuer=TOKEN_ISSUER,
-                audience=TOKEN_AUDIENCE,
-                options={"verify_exp": False},
-            )
-            user_id = payload.get("id")
-            exp = payload.get("exp")
-            ttl = max(0, int(exp) - int(datetime.utcnow().timestamp())) if exp else 3600
-            await blacklist_token(jti, ttl)
-        except Exception as e:
-            logger.warning("logout: token decode/blacklist failed", extra={"error": str(e)})
-    if user_id is not None:
-        try:
-            RemoteControlService.revoke_user_sessions(int(user_id), db_session, "logout")
-        except Exception as e:
-            logger.warning("logout: remote-control revoke failed", extra={"user_id": user_id, "error": str(e)})
-    jti_safe = (jti[:8] + "...") if jti and len(jti) >= 8 else (jti or None)
-    logger.info("logout", extra={"user_id": user_id, "jti_preview": jti_safe})
+@router.post("/logout")
+def logout(auth: V1UserAuth = Depends(auth_must), db_session: Session = Depends(session)):
+    """通过数据库版本撤销全部 access/refresh token，防止刷新令牌在退出后继续登录。"""
+    revoke_account_sessions(auth.id, db_session, "logout")
+    db_session.commit()
     return {"success": True, "message": "Logged out"}

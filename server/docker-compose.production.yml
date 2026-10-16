@@ -1,0 +1,119 @@
+name: eigent
+
+x-application: &application
+  image: eigent-server:${SERVER_IMAGE_TAG:-local}
+  build:
+    context: ..
+    dockerfile: server/Dockerfile
+    args:
+      SERVER_CODE_HASH: ${SERVER_CODE_HASH:-unknown}
+  env_file: .env.production
+  environment: &application-env
+    DEPLOYMENT_ENV: production
+    database_url: postgresql://eigent:${POSTGRES_PASSWORD:?Generate production secrets first}@postgres:5432/eigent
+    redis_url: redis://redis:6379/0
+    SESSION_REDIS_URL: redis://redis:6379/1
+    celery_broker_url: redis://redis:6379/2
+    celery_result_url: redis://redis:6379/3
+    RUN_MIGRATIONS: 'false'
+    ALLOW_LOCAL_AUTO_LOGIN: 'false'
+  volumes:
+    - uploads:/app/app/public/upload
+    - logs:/app/runtime/log
+  networks: [private]
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: [edge]
+    ports: ['80:80', '443:443']
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN in production environment}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      private:
+        ipv4_address: 172.30.21.10
+    depends_on:
+      api: {condition: service_healthy}
+
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: eigent
+      POSTGRES_USER: eigent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Generate production secrets first}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [private]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U eigent -d eigent']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: [redis-server, --appendonly, 'yes']
+    volumes: [redis_data:/data]
+    networks: [private]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *application
+    restart: 'no'
+    command: [sh, -c, 'python scripts/wait_for_db.py && alembic upgrade head']
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *application
+    restart: unless-stopped
+    ports: ['127.0.0.1:3001:5678']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, 'http://localhost:5678/ready']
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  celery_worker:
+    <<: *application
+    restart: unless-stopped
+    command: /app/celery/worker/start
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  celery_beat:
+    <<: *application
+    restart: unless-stopped
+    command: /app/celery/beat/start
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+networks:
+  private:
+    ipam:
+      config:
+        - subnet: 172.30.21.0/24
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads:
+  logs:
+  caddy_data:
+  caddy_config:

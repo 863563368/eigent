@@ -24,12 +24,13 @@ from sqlmodel import Session
 
 from app.core import code
 from app.core.database import session
+from app.core.deployment import enabled
 from app.core.encrypt import password_verify
 from app.core.environment import env
 from app.model.user.user import LoginByPasswordIn, LoginResponse, Status, User
 from app.shared.auth import create_access_token, create_refresh_token
-from app.shared.auth.token_blacklist import blacklist_token
-from app.shared.auth.user_auth import decode_refresh_token
+from app.shared.auth.token_blacklist import consume_refresh_token
+from app.shared.auth.user_auth import decode_refresh_token, token_version_from_token
 from app.shared.exception import TokenException, UserException
 from app.shared.middleware.rate_limit import login_rate_limiter
 
@@ -39,7 +40,7 @@ router = APIRouter(prefix="/user", tags=["V1 Login"])
 @router.post("/dev_login", name="dev login (Swagger only)", include_in_schema=True)
 async def dev_login(username: str | None = Form(default=None), password: str | None = Form(default=None)):
     """Debug-only login for Swagger Authorize. Accepts OAuth2 password form."""
-    if env("debug", "") != "on":
+    if env("debug", "") != "on" or not enabled("ALLOW_LOCAL_AUTO_LOGIN") or env("DEPLOYMENT_ENV") == "production":
         raise HTTPException(status_code=404)
     return {"access_token": create_access_token(1), "token_type": "bearer"}
 
@@ -47,8 +48,13 @@ async def dev_login(username: str | None = Form(default=None), password: str | N
 @router.post("/auto-login", name="auto login for local mode")
 async def auto_login(db_session: Session = Depends(session)) -> LoginResponse:
     """Auto login for fully local mode. Returns most recently active user or creates default."""
+    # 免密入口必须显式开启，生产环境即使误配置开关也不可用。
+    if not enabled("ALLOW_LOCAL_AUTO_LOGIN") or env("DEPLOYMENT_ENV") == "production":
+        raise HTTPException(status_code=404)
     user = User.by(
         User.status == Status.Normal,
+        User.is_active == True,
+        User.deleted_at.is_(None),
         order_by=User.updated_at.desc(),
         limit=1,
         s=db_session,
@@ -76,7 +82,7 @@ async def auto_login(db_session: Session = Depends(session)) -> LoginResponse:
 
     logger.info("Auto login successful", extra={"user_id": user.id, "email": user.email})
     return LoginResponse(
-        token=create_access_token(user.id), email=user.email, user_id=user.id
+        token=create_access_token(user.id, token_version=user.token_version), email=user.email, user_id=user.id
     )
 
 
@@ -87,16 +93,18 @@ class RefreshTokenIn(BaseModel):
 @router.post("/login", name="login by email or password", dependencies=[login_rate_limiter])
 async def by_password(data: LoginByPasswordIn, db_session: Session = Depends(session)) -> dict:
     """User login with email and password. Returns access_token (1h) and refresh_token (30d)."""
-    user = User.by(User.email == data.email, s=db_session).one_or_none()
+    from sqlalchemy import func
+
+    user = User.by(func.lower(User.email) == data.email.lower(), s=db_session).one_or_none()
     if not user or not password_verify(data.password, user.password):
         raise UserException(code.password, _("Account or password error"))
-    if user.status == Status.Block:
+    if user.status == Status.Block or user.deleted_at is not None:
         raise UserException(code.error, _("Your account has been blocked."))
     if not user.is_active:
         raise UserException(code.error, _("Please activate your account via the email link."))
 
-    access_token = create_access_token(user.id)
-    refresh_token = create_refresh_token(user.id)
+    access_token = create_access_token(user.id, token_version=user.token_version)
+    refresh_token = create_refresh_token(user.id, token_version=user.token_version)
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -111,18 +119,22 @@ async def refresh(data: RefreshTokenIn, db_session: Session = Depends(session)) 
     if not data.refresh_token:
         raise TokenException(code.token_need, _("Refresh token required"))
     user_id, jti, exp_ts = await decode_refresh_token(data.refresh_token)
-    user = db_session.get(User, user_id)
+    # 锁住账户行，使刷新与封禁、退出的会话版本更新保持一致。
+    from sqlmodel import select
+
+    user = db_session.exec(select(User).where(User.id == user_id).with_for_update()).one_or_none()
     if not user:
         raise TokenException(code.token_invalid, _("User not found"))
-    if user.status == Status.Block:
+    if user.status == Status.Block or user.deleted_at is not None:
         raise UserException(code.error, _("Your account has been blocked."))
     if not user.is_active:
         raise UserException(code.error, _("Please activate your account via the email link."))
-    if jti:
-        ttl = max(0, exp_ts - int(time.time()))
-        await blacklist_token(jti, ttl)
-    access_token = create_access_token(user.id)
-    refresh_token = create_refresh_token(user.id)
+    if token_version_from_token(data.refresh_token) != user.token_version:
+        raise TokenException(code.token_blocked, "Session has been revoked")
+    if not jti or not await consume_refresh_token(jti, exp_ts - int(time.time())):
+        raise TokenException(code.token_blocked, "Refresh token has already been used")
+    access_token = create_access_token(user.id, token_version=user.token_version)
+    refresh_token = create_refresh_token(user.id, token_version=user.token_version)
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,

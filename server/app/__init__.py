@@ -12,36 +12,40 @@
 # limitations under the License.
 # ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-from contextlib import asynccontextmanager
-from fastapi import APIRouter, FastAPI
-from fastapi_pagination import add_pagination
-from fastapi_limiter import FastAPILimiter
-from app.core.environment import env_or_fail
-from redis import asyncio as aioredis
 import logging
+from contextlib import asynccontextmanager
+
+from fastapi import APIRouter, FastAPI
+from fastapi_limiter import FastAPILimiter
+from fastapi_pagination import add_pagination
+from redis import asyncio as aioredis
+
+from app.core.deployment import validate_production_settings
+from app.core.environment import env_or_fail
 
 logger = logging.getLogger("server_app")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown events."""
+    # 启动前校验生产开关，避免开发配置意外用于公网。
+    validate_production_settings()
     # Startup: Initialize rate limiter with Redis
     redis_url = env_or_fail("redis_url")
     redis_connection = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
     await FastAPILimiter.init(redis_connection)
     logger.info("FastAPI Limiter initialized with Redis")
-    
+
     yield
-    
+
     # Shutdown: Close Redis connection
     await FastAPILimiter.close()
     logger.info("FastAPI Limiter closed")
 
+
 # Add lifespan for ratelimiter setup
-api = FastAPI(
-  swagger_ui_parameters={"persistAuthorization": True},
-  lifespan=lifespan
-)
+api = FastAPI(swagger_ui_parameters={"persistAuthorization": True}, lifespan=lifespan)
 add_pagination(api)
 
 router = APIRouter()

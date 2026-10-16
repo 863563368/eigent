@@ -971,7 +971,7 @@ class RemoteControlService:
         RemoteControlService.publish_status(session.id, "session_revoked", {"session_id": session.id})
 
     @staticmethod
-    def revoke_user_sessions(user_id: int, db: Session, reason: str) -> int:
+    def revoke_user_sessions(user_id: int, db: Session, reason: str, *, commit: bool = True) -> int:
         sessions = db.exec(
             select(RemoteControlSession).where(
                 RemoteControlSession.user_id == user_id,
@@ -1001,7 +1001,10 @@ class RemoteControlService:
                 db,
                 commit=False,
             )
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         for session in sessions:
             RemoteControlService.publish_status(
                 session.id,

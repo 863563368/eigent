@@ -1,0 +1,11 @@
+# Caddy 自动申请和续期 HTTPS 证书；域名需先解析到此服务器。
+{$API_DOMAIN} {
+    request_body {
+        max_size 10MB
+    }
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy api:5678
+}
