@@ -2,6 +2,23 @@
 
 本说明对应 `codex/self-hosted-server` 分支。服务端提供账户、管理员、角色、设备、任务事件统计和原有业务能力；桌面客户端的自有登录与同步接入需要在后续客户端阶段完成。
 
+## 构建下载慢
+
+如果卡在 `apt-get update` 或 Debian 软件包下载，先按 `Ctrl+C` 停止当前构建，在 `server/` 目录执行：
+
+```bash
+git pull --ff-only
+docker compose --env-file .env.production -f docker-compose.production.yml build \
+  --build-arg DEBIAN_MIRROR=mirrors.tuna.tsinghua.edu.cn api
+docker compose --env-file .env.production -f docker-compose.production.yml up -d --no-build
+```
+
+IP 模式按上面命令启动；域名 HTTPS 模式在最后的启动命令增加 `--profile edge`。同一镜像供 API、迁移和 Celery 共用，不必为每个服务单独构建。可在 `.env.production` 中加入 `DEBIAN_MIRROR=mirrors.tuna.tsinghua.edu.cn`，保存后续构建的源选择。
+
+构建保留 apt 和 uv 缓存，并移除了重复的 apt 安装。Rust 默认不安装；只有依赖明确报错需要 Rust 源码编译时，再在构建命令中增加 `--build-arg INSTALL_RUST_TOOLCHAIN=true`。这些调整不会改变 `uv.lock` 的 Python 包下载地址，后续若卡在 Python 包或 GitHub 下载，应按对应日志继续排查。
+
+镜像源配置参照[清华镜像站 Debian 说明](https://mirrors.tuna.tsinghua.edu.cn/help/debian/)，缓存方式参照 [Docker 构建缓存说明](https://docs.docker.com/build/cache/optimize/)。
+
 ## 无域名：使用 IPv4 部署
 
 服务器已安装 Git、Python 3、Docker、Compose 插件，并放行 TCP 3001。把下面的 `你的服务器IP` 换成实际 IPv4 地址。

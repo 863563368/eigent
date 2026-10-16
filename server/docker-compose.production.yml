@@ -7,6 +7,8 @@ x-application: &application
     dockerfile: server/Dockerfile
     args:
       SERVER_CODE_HASH: ${SERVER_CODE_HASH:-unknown}
+      DEBIAN_MIRROR: ${DEBIAN_MIRROR:-deb.debian.org}
+      INSTALL_RUST_TOOLCHAIN: ${INSTALL_RUST_TOOLCHAIN:-false}
   env_file: .env.production
   environment: &application-env
     DEPLOYMENT_ENV: production
